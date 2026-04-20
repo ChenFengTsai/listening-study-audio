@@ -25,10 +25,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--prompts-jsonl", default="/storage/ssd1/richtsai1103/MusicBench/MusicBench_test_A.json")
     
-    # Updated default path for TF-MusicGen based on your input
+    # Model directories
     ap.add_argument("--tf-dir", default="/storage/ssd3/richtsai1103/MusicBench/MusicGen_TF/generation_10s_split/seg2")
     ap.add_argument("--sass-dir", default="/storage/ssd3/richtsai1103/MusicBench/SSM_TTM/wav_sample_10s")
     
+    # Attention checks
     ap.add_argument("--attn-static-dir", default="/storage/ssd3/richtsai1103/MusicBench/attention/static")
     ap.add_argument("--attn-clean-dir", default="/storage/ssd3/richtsai1103/MusicBench/attention/clean")
     ap.add_argument("--attn-count", type=int, default=2)
@@ -40,8 +41,9 @@ def main():
     ap.add_argument("--repo-dir", required=True, help="Local path to your cloned git repository")
     ap.add_argument("--repo-prefix", default="clips", help="Subfolder inside the repo to store audio")
 
-    ap.add_argument("--out-csv", default="/mnt/user-data/outputs/hits.csv")
-    ap.add_argument("--out-copy-script", default="/mnt/user-data/outputs/copy_to_repo.sh")
+    # Outputs default locally to avoid permission errors
+    ap.add_argument("--out-csv", default="./outputs/hits.csv")
+    ap.add_argument("--out-copy-script", default="./outputs/copy_to_repo.sh")
     ap.add_argument("--seed", type=int, default=42)
 
     args = ap.parse_args()
@@ -52,17 +54,29 @@ def main():
         samples = [json.loads(line) for line in f if line.strip()]
     prompts_by_stem = {Path(s["location"]).stem: s["main_caption"] for s in samples}
 
-    seg_suffix = f"_seg{args.segment_index}.wav"
+    # Flexibly find files and their stems (handles both _seg2.wav and .wav)
+    def get_files_and_stems(d: str):
+        if not Path(d).exists(): return {}
+        file_map = {}
+        for p in Path(d).glob("*.wav"):
+            stem = p.name.replace(f"_seg{args.segment_index}.wav", "").replace(".wav", "")
+            file_map[stem] = p
+        return file_map
 
-    def stems_in(d: str) -> set:
-        if not Path(d).exists(): return set()
-        return {p.name[: -len(seg_suffix)] for p in Path(d).glob(f"*{seg_suffix}")}
-
-    sass_stems = stems_in(args.sass_dir)
-    tf_stems   = stems_in(args.tf_dir)
+    sass_map = get_files_and_stems(args.sass_dir)
+    tf_map   = get_files_and_stems(args.tf_dir)
+    
+    sass_stems = set(sass_map.keys())
+    tf_stems   = set(tf_map.keys())
     available  = sorted(set(prompts_by_stem) & sass_stems & tf_stems)
 
     if args.max_pairs: available = available[: args.max_pairs]
+
+    print(f"SASS: {len(sass_stems)} | TF: {len(tf_stems)} | Intersect-with-prompts: {len(available)}")
+
+    if len(available) == 0:
+        print("\n[!] Error: No overlapping files found between SASS, TF-MusicGen, and the JSON prompts.")
+        return
 
     # Collect files to copy
     uploads: dict[Path, str] = {}
@@ -75,8 +89,8 @@ def main():
     rows = []
     for stem in available:
         prompt   = prompts_by_stem[stem]
-        sass_p   = Path(args.sass_dir) / f"{stem}{seg_suffix}"
-        tf_p     = Path(args.tf_dir)   / f"{stem}{seg_suffix}"
+        sass_p   = sass_map[stem]
+        tf_p     = tf_map[stem]
         
         sass_url = register(sass_p, "SASS")
         tf_url   = register(tf_p,   "TF_MusicGen")
@@ -115,7 +129,7 @@ def main():
         writer.writeheader()
         writer.writerows(final)
 
-    # Write copy script (instead of gsutil script)
+    # Write copy script
     Path(args.out_copy_script).parent.mkdir(parents=True, exist_ok=True)
     with open(args.out_copy_script, "w", encoding="utf-8") as f:
         f.write("#!/usr/bin/env bash\n")
